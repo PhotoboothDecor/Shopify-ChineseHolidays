@@ -1,0 +1,369 @@
+{% comment %}
+  Chinese Holiday Banner
+  Automatically switches between a sales banner and a holiday delay warning
+  based on Chinese holiday dates (2024–2050).
+
+  Add this section to your theme via:
+  Theme Editor → Add section → "Holiday Banner"
+{% endcomment %}
+
+{%- liquid
+  assign override = section.settings.override_mode
+  assign sales_msg = section.settings.sales_message
+  assign pre_holiday_msg = section.settings.pre_holiday_message
+  assign holiday_msg = section.settings.holiday_message
+  assign sales_bg = section.settings.sales_bg_color
+  assign sales_text = section.settings.sales_text_color
+  assign pre_holiday_bg = section.settings.pre_holiday_bg_color
+  assign pre_holiday_text = section.settings.pre_holiday_text_color
+  assign holiday_bg = section.settings.holiday_bg_color
+  assign holiday_text = section.settings.holiday_text_color
+-%}
+
+<style>
+  .chinese-holiday-banner {
+    width: 100%;
+    padding: 10px 20px;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.4;
+    z-index: 9999;
+    position: relative;
+    display: none;
+  }
+
+  .chinese-holiday-banner.is-visible {
+    display: block;
+  }
+
+  .chinese-holiday-banner p {
+    margin: 0;
+    padding: 0;
+  }
+
+  @media (max-width: 749px) {
+    .chinese-holiday-banner {
+      font-size: 12px;
+      padding: 8px 15px;
+    }
+  }
+</style>
+
+<div
+  id="chinese-holiday-banner"
+  class="chinese-holiday-banner"
+  role="status"
+  aria-live="polite"
+  data-override="{{ override }}"
+  data-sales-msg="{{ sales_msg | escape }}"
+  data-pre-holiday-msg="{{ pre_holiday_msg | escape }}"
+  data-holiday-msg="{{ holiday_msg | escape }}"
+  data-sales-bg="{{ sales_bg }}"
+  data-sales-text="{{ sales_text }}"
+  data-pre-holiday-bg="{{ pre_holiday_bg }}"
+  data-pre-holiday-text="{{ pre_holiday_text }}"
+  data-holiday-bg="{{ holiday_bg }}"
+  data-holiday-text="{{ holiday_text }}"
+>
+  <p id="chinese-holiday-banner-text"></p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* =============================================
+     Chinese New Year lookup table (2024–2050)
+     Values: [month (0-indexed), day]
+
+     Sources (verified April 2026):
+       - Hong Kong Observatory: hko.gov.hk/en/gts/time/conversion1_text.htm
+       - timeanddate.com/holidays/china/chinese-new-year
+       - chinesefortunecalendar.com/TDB/NewYearDays.asp
+     ============================================= */
+  var CNY = {
+    2024: [1, 10],  // Feb 10
+    2025: [0, 29],  // Jan 29
+    2026: [1, 17],  // Feb 17
+    2027: [1, 6],   // Feb 6
+    2028: [0, 26],  // Jan 26
+    2029: [1, 13],  // Feb 13
+    2030: [1, 3],   // Feb 3
+    2031: [0, 23],  // Jan 23
+    2032: [1, 11],  // Feb 11
+    2033: [0, 31],  // Jan 31
+    2034: [1, 19],  // Feb 19
+    2035: [1, 8],   // Feb 8
+    2036: [0, 28],  // Jan 28
+    2037: [1, 15],  // Feb 15
+    2038: [1, 4],   // Feb 4
+    2039: [0, 24],  // Jan 24
+    2040: [1, 12],  // Feb 12
+    2041: [1, 1],   // Feb 1
+    2042: [0, 22],  // Jan 22
+    2043: [1, 10],  // Feb 10
+    2044: [0, 30],  // Jan 30
+    2045: [1, 17],  // Feb 17
+    2046: [1, 6],   // Feb 6
+    2047: [0, 26],  // Jan 26
+    2048: [1, 14],  // Feb 14
+    2049: [1, 2],   // Feb 2
+    2050: [0, 23]   // Jan 23
+  };
+
+  var PRE_WARNING_DAYS = 14;
+  var CNY_DURATION_DAYS = 16;
+
+  /* Fixed holidays: [month (0-indexed), startDay, endDay]
+     Note: Qingming alternates between Apr 4 and Apr 5 depending on the year.
+     We cover Apr 4–5 to be safe (one extra day in some years is fine for a warning).
+     Labour Day official dates are May 1–5, but factories often extend through May 7. */
+  var FIXED_HOLIDAYS = [
+    [3, 4, 5],   // Qingming: Apr 4–5
+    [4, 1, 7],   // Labour Day: May 1–7 (extended for factory closures)
+    [9, 1, 7]    // National Day: Oct 1–7
+  ];
+
+  /* =============================================
+     Date utilities — all date logic uses China
+     Standard Time (UTC+8) to match when Chinese
+     suppliers are actually on holiday, regardless
+     of the customer's local timezone.
+     ============================================= */
+  function getChinaDate() {
+    var now = new Date();
+    var utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    return new Date(utc + 8 * 3600000);
+  }
+
+  function addDays(date, days) {
+    var d = new Date(date.getTime());
+    d.setDate(d.getDate() + days);
+    return d;
+  }
+
+  function startOfDay(date) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  }
+
+  function isBetween(date, start, end) {
+    var d = startOfDay(date).getTime();
+    return d >= startOfDay(start).getTime() && d <= startOfDay(end).getTime();
+  }
+
+  /**
+   * Returns the current banner state.
+   *
+   * Priority order (first match wins):
+   *   1. 'holiday'      — during an active holiday (most urgent)
+   *   2. 'pre-holiday'  — within 14 days before a holiday
+   *   3. 'sales'        — normal (no holiday nearby)
+   *
+   * Evaluation order: CNY (current year) → CNY (previous year overflow)
+   * → CNY (next year pre-warning) → fixed holidays (Qingming, Labour, National).
+   * If two windows overlap, the first match wins. Since we check 'holiday'
+   * before 'pre-holiday' for each entry, active holidays always take priority.
+   */
+  function getBannerState(today) {
+    var year = today.getFullYear();
+
+    /* Check Chinese New Year (current year) */
+    var cnyEntry = CNY[year];
+    if (cnyEntry) {
+      var cnyStart = new Date(year, cnyEntry[0], cnyEntry[1]);
+      var cnyEnd = addDays(cnyStart, CNY_DURATION_DAYS - 1);
+      var cnyPreStart = addDays(cnyStart, -PRE_WARNING_DAYS);
+
+      if (isBetween(today, cnyStart, cnyEnd)) return 'holiday';
+      if (isBetween(today, cnyPreStart, addDays(cnyStart, -1))) return 'pre-holiday';
+    }
+
+    /* Check previous year's CNY in case it bleeds into January */
+    var prevCny = CNY[year - 1];
+    if (prevCny) {
+      var prevStart = new Date(year - 1, prevCny[0], prevCny[1]);
+      var prevEnd = addDays(prevStart, CNY_DURATION_DAYS - 1);
+      if (isBetween(today, prevStart, prevEnd)) return 'holiday';
+    }
+
+    /* Check next year's CNY pre-warning in case it starts in December */
+    var nextCny = CNY[year + 1];
+    if (nextCny) {
+      var nextStart = new Date(year + 1, nextCny[0], nextCny[1]);
+      var nextPreStart = addDays(nextStart, -PRE_WARNING_DAYS);
+      if (isBetween(today, nextPreStart, addDays(nextStart, -1))) return 'pre-holiday';
+    }
+
+    /* Check fixed holidays */
+    for (var i = 0; i < FIXED_HOLIDAYS.length; i++) {
+      var h = FIXED_HOLIDAYS[i];
+      var hStart = new Date(year, h[0], h[1]);
+      var hEnd = new Date(year, h[0], h[2]);
+      var hPreStart = addDays(hStart, -PRE_WARNING_DAYS);
+
+      if (isBetween(today, hStart, hEnd)) return 'holiday';
+      if (isBetween(today, hPreStart, addDays(hStart, -1))) return 'pre-holiday';
+    }
+
+    return 'sales';
+  }
+
+  /* =============================================
+     Render the banner
+     ============================================= */
+  var banner = document.getElementById('chinese-holiday-banner');
+  var textEl = document.getElementById('chinese-holiday-banner-text');
+
+  if (!banner || !textEl) return;
+
+  var override = banner.getAttribute('data-override');
+  var salesMsg = banner.getAttribute('data-sales-msg');
+  var preHolidayMsg = banner.getAttribute('data-pre-holiday-msg');
+  var holidayMsg = banner.getAttribute('data-holiday-msg');
+  var salesBg = banner.getAttribute('data-sales-bg');
+  var salesText = banner.getAttribute('data-sales-text');
+  var preHolidayBg = banner.getAttribute('data-pre-holiday-bg');
+  var preHolidayText = banner.getAttribute('data-pre-holiday-text');
+  var holidayBg = banner.getAttribute('data-holiday-bg');
+  var holidayText = banner.getAttribute('data-holiday-text');
+
+  /* Determine state: overrides take priority, then auto-detection */
+  var state;
+
+  switch (override) {
+    case 'force-holiday':
+      state = 'holiday';
+      break;
+    case 'force-pre-holiday':
+      state = 'pre-holiday';
+      break;
+    case 'force-sales':
+      state = 'sales';
+      break;
+    case 'hidden':
+      return; /* Banner stays display:none — exits immediately */
+    default:
+      state = getBannerState(getChinaDate());
+  }
+
+  /* Apply the correct message and colors */
+  if (state === 'holiday') {
+    textEl.textContent = holidayMsg;
+    banner.style.backgroundColor = holidayBg;
+    banner.style.color = holidayText;
+  } else if (state === 'pre-holiday') {
+    textEl.textContent = preHolidayMsg;
+    banner.style.backgroundColor = preHolidayBg;
+    banner.style.color = preHolidayText;
+  } else {
+    textEl.textContent = salesMsg;
+    banner.style.backgroundColor = salesBg;
+    banner.style.color = salesText;
+  }
+
+  /* Reveal the banner now that content is set (prevents empty flash) */
+  banner.classList.add('is-visible');
+})();
+</script>
+
+{% schema %}
+{
+  "name": "Holiday Banner",
+  "tag": "section",
+  "class": "chinese-holiday-banner-section",
+  "settings": [
+    {
+      "type": "header",
+      "content": "Override"
+    },
+    {
+      "type": "select",
+      "id": "override_mode",
+      "label": "Banner mode",
+      "options": [
+        { "value": "auto", "label": "Auto (follow holiday calendar)" },
+        { "value": "force-holiday", "label": "Force holiday warning" },
+        { "value": "force-pre-holiday", "label": "Force pre-holiday urgency" },
+        { "value": "force-sales", "label": "Force sales message" },
+        { "value": "hidden", "label": "Hidden (banner off)" }
+      ],
+      "default": "auto",
+      "info": "Auto mode switches the banner automatically based on Chinese holiday dates. Use overrides to force a specific message, or hide the banner entirely."
+    },
+    {
+      "type": "header",
+      "content": "Sales banner"
+    },
+    {
+      "type": "text",
+      "id": "sales_message",
+      "label": "Sales message",
+      "default": "Free shipping on orders over $50 — shop now!"
+    },
+    {
+      "type": "color",
+      "id": "sales_bg_color",
+      "label": "Background color",
+      "default": "#2E7D32"
+    },
+    {
+      "type": "color",
+      "id": "sales_text_color",
+      "label": "Text color",
+      "default": "#FFFFFF"
+    },
+    {
+      "type": "header",
+      "content": "Pre-holiday banner (14 days before)"
+    },
+    {
+      "type": "text",
+      "id": "pre_holiday_message",
+      "label": "Pre-holiday message",
+      "default": "Our suppliers are going on holiday soon — order now to avoid shipping delays!",
+      "info": "Shown 14 days before a holiday starts. Use this for urgency messaging to drive sales."
+    },
+    {
+      "type": "color",
+      "id": "pre_holiday_bg_color",
+      "label": "Background color",
+      "default": "#F9A825"
+    },
+    {
+      "type": "color",
+      "id": "pre_holiday_text_color",
+      "label": "Text color",
+      "default": "#000000"
+    },
+    {
+      "type": "header",
+      "content": "Holiday banner (during holiday)"
+    },
+    {
+      "type": "text",
+      "id": "holiday_message",
+      "label": "Holiday message",
+      "default": "Orders placed during this period may experience delays of 1–3 weeks due to a supplier holiday.",
+      "info": "Shown during the actual holiday period."
+    },
+    {
+      "type": "color",
+      "id": "holiday_bg_color",
+      "label": "Background color",
+      "default": "#E65100"
+    },
+    {
+      "type": "color",
+      "id": "holiday_text_color",
+      "label": "Text color",
+      "default": "#FFFFFF"
+    }
+  ],
+  "presets": [
+    {
+      "name": "Holiday Banner"
+    }
+  ]
+}
+{% endschema %}
