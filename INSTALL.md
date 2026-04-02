@@ -4,11 +4,10 @@
 
 1. Go to your Shopify Admin → **Online Store** → **Themes**
 2. Click **"..."** on your active theme → **Edit code**
-3. In the left sidebar, find the **Sections** folder
-4. Click the **"Add a new file"** icon (small page icon at the top of the file tree)
-5. Create a new file named `chinese-holiday-banner.liquid` inside the `sections/` folder
-6. Copy the entire contents of `sections/chinese-holiday-banner.liquid` from this repo and paste it in
-7. Click **Save**
+3. In the left sidebar, right-click the **sections** folder → **New File...**
+4. Name it `chinese-holiday-banner.liquid`
+5. Copy the entire contents of [`sections/chinese-holiday-banner.liquid`](https://github.com/PhotoboothDecor/Shopify-ChineseHolidays/blob/main/sections/chinese-holiday-banner.liquid) from this repo and paste it in
+6. Click **Save**
 
 ## Step 2: Add the banner to your theme layout
 
